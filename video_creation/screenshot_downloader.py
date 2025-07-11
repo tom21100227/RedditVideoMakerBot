@@ -1,10 +1,12 @@
 import json
+import os
 import re
 from pathlib import Path
 from typing import Dict, Final
 
 import translators
-from playwright.sync_api import ViewportSize, sync_playwright
+from PIL import Image
+from playwright.sync_api import TimeoutError, ViewportSize, sync_playwright
 from rich.progress import track
 
 from utils import settings
@@ -14,6 +16,48 @@ from utils.playwright import clear_cookie_by_name
 from utils.videos import save_data
 
 __all__ = ["get_screenshots_of_reddit_posts"]
+
+
+def stitch_comment_images(meta_path, body_path, actions_path, output_path):
+    """
+    Stitches three images together vertically and saves the result.
+    """
+    try:
+        print(f"Attempting to stitch the following images: \n{meta_path=}\n{body_path=}\n{actions_path=}")
+        # Open the three images
+        meta_img = Image.open(meta_path)
+        body_img = Image.open(body_path)
+        actions_img = Image.open(actions_path)
+
+        # Get the dimensions of each image
+        meta_width, meta_height = meta_img.size
+        body_width, body_height = body_img.size
+        actions_width, actions_height = actions_img.size
+        print(f"Dimensions: Meta={meta_img.size}, Body={body_img.size}, Actions={actions_img.size}")
+
+
+        # Create a new blank image with the combined height
+        # Use the maximum width to be safe, though they should be identical
+        total_width = max(meta_width, body_width, actions_width)
+        total_height = meta_height + body_height + actions_height
+        print(f"Total dimensions: ({total_width}, {total_height})")
+
+        # Create a new image with a transparent background
+        stitched_image = Image.new("RGBA", (total_width, total_height), (0, 0, 0, 0))
+
+        # Paste the images in order
+        stitched_image.paste(meta_img, (0, 0))
+        stitched_image.paste(body_img, (0, meta_height))
+        stitched_image.paste(actions_img, (0, meta_height + body_height))
+
+        # Save the final stitched image
+        stitched_image.save(output_path)
+        print(f"Successfully stitched comment and saved to {output_path}")
+
+    except FileNotFoundError as e:
+        print(f"Error: Could not find an image file for stitching - {e}")
+    except Exception as e:
+        print(f"An error occurred during image stitching: {e}")
 
 
 def get_screenshots_of_reddit_posts(reddit_object: dict, screenshot_num: int):
@@ -177,12 +221,12 @@ def get_screenshots_of_reddit_posts(reddit_object: dict, screenshot_num: int):
                 # zoom the body of the page
                 page.evaluate("document.body.style.zoom=" + str(zoom))
                 # as zooming the body doesn't change the properties of the divs, we need to adjust for the zoom
-                location = page.locator('[data-test-id="post-content"]').bounding_box()
+                location = page.locator('h1[slot="title"]').bounding_box()
                 for i in location:
                     location[i] = float("{:.2f}".format(location[i] * zoom))
                 page.screenshot(clip=location, path=postcontentpath)
             else:
-                page.locator('[data-test-id="post-content"]').screenshot(path=postcontentpath)
+                page.locator('h1[slot="title"]').screenshot(path=postcontentpath)
         except Exception as e:
             print_substep("Something went wrong!", style="red")
             resp = input(
@@ -231,32 +275,53 @@ def get_screenshots_of_reddit_posts(reddit_object: dict, screenshot_num: int):
                         to_language=settings.config["reddit"]["thread"]["post_lang"],
                     )
                     page.evaluate(
-                        '([tl_content, tl_id]) => document.querySelector(`#t1_${tl_id} > div:nth-child(2) > div > div[data-testid="comment"] > div`).textContent = tl_content',
+                        '([tl_content, tl_id]) => document.querySelector(`#t1_${tl_id} > div:nth-child(2) > div > div[data-testid=\"comment\"] > div`).textContent = tl_content',
                         [comment_tl, comment["comment_id"]],
                     )
                 try:
-                    if settings.config["settings"]["zoom"] != 1:
-                        # store zoom settings
-                        zoom = settings.config["settings"]["zoom"]
-                        # zoom the body of the page
-                        page.evaluate("document.body.style.zoom=" + str(zoom))
-                        # scroll comment into view
-                        page.locator(f"#t1_{comment['comment_id']}").scroll_into_view_if_needed()
-                        # as zooming the body doesn't change the properties of the divs, we need to adjust for the zoom
-                        location = page.locator(f"#t1_{comment['comment_id']}").bounding_box()
-                        for i in location:
-                            location[i] = float("{:.2f}".format(location[i] * zoom))
-                        page.screenshot(
-                            clip=location,
-                            path=f"assets/temp/{reddit_id}/png/comment_{idx}.png",
-                        )
-                    else:
-                        page.locator(f"#t1_{comment['comment_id']}").screenshot(
-                            path=f"assets/temp/{reddit_id}/png/comment_{idx}.png"
-                        )
+                    zoom = settings.config["settings"]["zoom"]
+                    if zoom != 1:
+                        page.evaluate(f"document.body.style.zoom={zoom}")
+
+                    # The base locator for the specific comment you are on
+                    comment_locator = page.locator(
+                        f"shreddit-comment[thingid='t1_{comment['comment_id']}']"
+                    )
+                    comment_locator.scroll_into_view_if_needed()
+                    page.wait_for_timeout(500)  # wait for scroll to finish
+
+                    # Define the paths for the temporary parts
+                    meta_path = f"assets/temp/{reddit_id}/png/comment_{idx}_meta.png"
+                    body_path = f"assets/temp/{reddit_id}/png/comment_{idx}_body.png"
+                    actions_path = f"assets/temp/{reddit_id}/png/comment_{idx}_actions.png"
+                    final_path = \
+                        f"assets/temp/{reddit_id}/png/comment_{idx}.png"  # The final output path
+
+                    # 1. Screenshot the comment's header/meta
+                    comment_locator.locator("> [slot='commentMeta']").screenshot(path=meta_path)
+
+                    # 2. Screenshot the comment's text body
+                    comment_locator.locator('[id$="-comment-rtjson-content"]').first.screenshot(
+                        path=body_path
+                    )
+
+                    # 3. Screenshot the comment's action bar
+                    comment_locator.locator("shreddit-comment-action-row").first.screenshot(
+                        path=actions_path
+                    )
+
+                    # 4. Stitch the parts together into the final image
+                    stitch_comment_images(meta_path, body_path, actions_path, final_path)
+
+                    # 5. (Optional) Clean up the temporary image parts
+                    os.remove(meta_path)
+                    os.remove(body_path)
+                    os.remove(actions_path)
+
+                    if zoom != 1:
+                        page.evaluate("document.body.style.zoom=1")  # Reset zoom
+
                 except TimeoutError:
-                    del reddit_object["comments"]
-                    screenshot_num += 1
                     print("TimeoutError: Skipping screenshot...")
                     continue
 

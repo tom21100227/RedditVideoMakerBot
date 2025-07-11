@@ -1,14 +1,19 @@
 import re
+import os
 from pathlib import Path
 from typing import Dict, Tuple
 
 import toml
+from dotenv import load_dotenv
 from rich.console import Console
 
 from utils.console import handle_input
 
 console = Console()
 config = dict  # autocomplete
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 def crawl(obj: dict, func=lambda x, y: print(x, y, end="\n"), path=None):
@@ -162,9 +167,55 @@ If you see any prompts, that means that you have unset/incorrectly set variables
     crawl(template, check_vars)
     with open(config_file, "w") as f:
         toml.dump(config, f)
+    
+    # Load environment variables and override sensitive config values
+    load_env_vars_to_config()
+    
     return config
+
+
+def load_env_vars_to_config():
+    """Load environment variables and override config values for sensitive data"""
+    global config
+    
+    # Reddit credentials
+    reddit_client_id = os.getenv('REDDIT_CLIENT_ID')
+    reddit_client_secret = os.getenv('REDDIT_CLIENT_SECRET')
+    reddit_username = os.getenv('REDDIT_USERNAME')
+    reddit_password = os.getenv('REDDIT_PASSWORD')
+    
+    # TikTok session ID
+    tiktok_sessionid = os.getenv('TIKTOK_SESSIONID')
+    
+    # ElevenLabs API key
+    elevenlabs_api_key = os.getenv('ELEVENLABS_API_KEY')
+    
+    # Ensure config sections exist
+    if 'reddit' not in config:
+        config['reddit'] = {}
+    if 'creds' not in config['reddit']:
+        config['reddit']['creds'] = {}
+    if 'settings' not in config:
+        config['settings'] = {}
+    if 'tts' not in config['settings']:
+        config['settings']['tts'] = {}
+    
+    # Override config values with environment variables if they exist
+    if reddit_client_id:
+        config['reddit']['creds']['client_id'] = reddit_client_id
+    if reddit_client_secret:
+        config['reddit']['creds']['client_secret'] = reddit_client_secret
+    if reddit_username:
+        config['reddit']['creds']['username'] = reddit_username
+    if reddit_password:
+        config['reddit']['creds']['password'] = reddit_password
+    if tiktok_sessionid:
+        config['settings']['tts']['tiktok_sessionid'] = tiktok_sessionid
+    if elevenlabs_api_key:
+        config['settings']['tts']['elevenlabs_api_key'] = elevenlabs_api_key
 
 
 if __name__ == "__main__":
     directory = Path().absolute()
     check_toml(f"{directory}/utils/.config.template.toml", "config.toml")
+    load_env_vars_to_config()
